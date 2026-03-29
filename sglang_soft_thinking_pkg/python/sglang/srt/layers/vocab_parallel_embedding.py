@@ -491,25 +491,44 @@ class VocabParallelEmbedding(torch.nn.Module):
     # begin of soft thinking
     # ==========
     # topk_probs is not None and topk_indices
-    def weighted_forward(self, topk_probs: torch.Tensor, topk_indices: torch.Tensor) -> torch.Tensor:
-        """Single-GPU weighted embedding forward.
+    def weighted_forward(self, topk_probs: torch.Tensor, topk_indices: torch.Tensor, beta: float = 1.0) -> torch.Tensor:
+        """Single-GPU Mixture-of-Inputs embedding forward.
+
+        h_t = (H / (β+1)) * soft_emb + ((β+1-H) / (β+1)) * static_emb
+
+        where H is the *normalized* entropy (H ∈ [0, 1]) of topk_probs,
+        soft_emb is the probability-weighted mixture embedding,
+        and static_emb is the sampled (argmax) token embedding.
 
         Args:
             topk_probs: [B, K] tensor of probabilities for top-K tokens.
             topk_indices: [B, K] tensor of token indices for top-K tokens.
+            beta: mixing hyperparameter controlling the soft/static trade-off.
 
         Returns:
-            hidden_states: [B, D] weighted embedding.
+            hidden_states: [B, D] mixed embedding.
         """
-
-        # Validate inputs
         assert topk_probs.shape == topk_indices.shape, "topk_probs and topk_indices must have same shape."
 
-        # Use quant_method.embedding for consistency
+        K = topk_probs.shape[-1]
         topk_embeddings = self.quant_method.embedding(self, topk_indices.long())  # [B, K, D]
-        # Normalize probs to sum to 1.0 along last dim.
-        topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True) # do norm here
-        hidden_states = torch.sum(topk_probs.unsqueeze(-1) * topk_embeddings, dim=1, dtype=topk_embeddings.dtype)  # [B, D]
+        topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)
+
+        # soft embedding (prior mean): Σ p[k] * e(k)
+        soft_emb = torch.sum(topk_probs.unsqueeze(-1) * topk_embeddings, dim=1, dtype=topk_embeddings.dtype)  # [B, D]
+
+        # static embedding (observation): sampled token = top-1
+        static_emb = topk_embeddings[:, 0, :]  # [B, D]
+
+        # normalized entropy: H = (-Σ p_k log p_k) / log K  ∈ [0, 1]
+        raw_entropy = -torch.sum(topk_probs * torch.log(topk_probs.clamp(min=1e-12)), dim=-1)  # [B]
+        log_K = torch.log(torch.tensor(K, dtype=topk_probs.dtype, device=topk_probs.device))
+        H = (raw_entropy / log_K).clamp(0.0, 1.0)  # [B]
+
+        alpha_soft = (H / (beta + 1)).unsqueeze(-1)       # [B, 1]
+        alpha_static = 1.0 - alpha_soft                    # [B, 1]
+
+        hidden_states = (alpha_soft * soft_emb + alpha_static * static_emb).to(soft_emb.dtype)  # [B, D]
         return hidden_states
 
     def weighted_forward_tp(self, topk_probs: torch.Tensor, topk_indices: torch.Tensor) -> torch.Tensor:
