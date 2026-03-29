@@ -491,7 +491,7 @@ class VocabParallelEmbedding(torch.nn.Module):
     # begin of soft thinking
     # ==========
     # topk_probs is not None and topk_indices
-    def weighted_forward(self, topk_probs: torch.Tensor, topk_indices: torch.Tensor, beta: float = 0.25) -> torch.Tensor:
+    def weighted_forward(self, topk_probs: torch.Tensor, topk_indices: torch.Tensor, beta: float = 0.1) -> torch.Tensor:
         """Single-GPU Mixture-of-Inputs embedding forward.
 
         h_t = (H / (β+1)) * soft_emb + ((β+1-H) / (β+1)) * static_emb
