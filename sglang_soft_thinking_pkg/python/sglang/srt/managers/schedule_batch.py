@@ -598,6 +598,8 @@ class Req:
             self.output_topk_idx_list_tmp = []
             # track consecutive low entropy steps for early stopping
             self.low_entropy_steps = 0
+            # previous hidden state for spherical interpolation (set after first forward)
+            self.prev_hidden_state = None
         # ==========
         # end of soft thinking
         # ==========
@@ -728,6 +730,8 @@ class Req:
         self.topk_prob = logits_output.topk_probs[index]
         self.topk_idx = logits_output.topk_indices[index]
         self.entropy = logits_output.entropy[index]
+        if logits_output.hidden_states is not None:
+            self.prev_hidden_state = logits_output.hidden_states[index]
         # last_token_id = self.output_ids[-1]
 
         if self.sampling_params.soft_thinking_mode:
@@ -1661,10 +1665,13 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         # ==========
         topk_probs = None
         topk_indices = None
+        prev_hidden_states = None
         if self.model_config.enable_soft_thinking:
             if self.enable_overlap or self.forward_mode.is_decode():
                 topk_probs = torch.stack([req.topk_prob for req in self.reqs])
                 topk_indices = torch.stack([req.topk_idx for req in self.reqs])
+                if self.reqs[0].prev_hidden_state is not None:
+                    prev_hidden_states = torch.stack([req.prev_hidden_state for req in self.reqs])
 
         capture_hidden_mode = self._get_capture_hidden_mode()
         # ==========
@@ -1710,6 +1717,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             # ==========
             topk_probs=topk_probs,
             topk_indices=topk_indices,
+            prev_hidden_states=prev_hidden_states,
             # ==========
             # end of soft thinking
             # ==========
@@ -1820,6 +1828,7 @@ class ModelWorkerBatch:
     # For soft thinking mode
     topk_probs: Optional[torch.Tensor] = None
     topk_indices: Optional[torch.Tensor] = None
+    prev_hidden_states: Optional[torch.Tensor] = None
     # ==========
     # end of soft thinking
     # ==========

@@ -256,6 +256,7 @@ class ForwardBatch:
     # ==========
     topk_probs: Optional[torch.Tensor] = None
     topk_indices: Optional[torch.Tensor] = None
+    prev_hidden_states: Optional[torch.Tensor] = None
     # ==========
     # end of soft thinking
     # ==========
@@ -304,6 +305,7 @@ class ForwardBatch:
             # ==========
             topk_probs=batch.topk_probs,
             topk_indices=batch.topk_indices,
+            prev_hidden_states=batch.prev_hidden_states,
             # ==========
             # end of soft thinking
             # ==========

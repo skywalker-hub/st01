@@ -223,6 +223,7 @@ class CudaGraphRunner:
         self.enable_soft_thinking = model_runner.server_args.enable_soft_thinking
         if self.enable_soft_thinking:
             self.max_topk = model_runner.server_args.max_topk
+            self.hidden_size = model_runner.model_config.hidden_size
 
         # Graph inputs
         with torch.device("cuda"):
@@ -239,6 +240,7 @@ class CudaGraphRunner:
             self.mrope_positions = torch.zeros((3, self.max_bs), dtype=torch.int64)
             self.topk_probs = torch.zeros((self.max_bs, self.max_topk), dtype=self.model_runner.dtype) if self.enable_soft_thinking else None
             self.topk_indices = torch.zeros((self.max_bs, self.max_topk), dtype=torch.int64) if self.enable_soft_thinking else None
+            self.prev_hidden_states = torch.zeros((self.max_bs, self.hidden_size), dtype=self.model_runner.dtype) if self.enable_soft_thinking else None
             # ==========
             # end of soft thinking
             # ==================
@@ -389,10 +391,12 @@ class CudaGraphRunner:
             input_ids = None
             topk_probs = self.topk_probs[:bs]
             topk_indices = self.topk_indices[:bs]
+            prev_hidden_states = self.prev_hidden_states[:bs]
         else:
             input_ids = self.input_ids[:num_tokens]
             topk_probs = None
             topk_indices = None
+            prev_hidden_states = None
         # ==========
         # end of soft thinking
         # ==========
@@ -459,6 +463,7 @@ class CudaGraphRunner:
             capture_hidden_mode=self.capture_hidden_mode,
             topk_probs=topk_probs,
             topk_indices=topk_indices,
+            prev_hidden_states=prev_hidden_states,
         )
 
         # Attention backend
@@ -549,6 +554,10 @@ class CudaGraphRunner:
             self.topk_indices[:raw_bs].copy_(
                 forward_batch.topk_indices
             )
+            if forward_batch.prev_hidden_states is not None:
+                self.prev_hidden_states[:raw_bs].copy_(
+                    forward_batch.prev_hidden_states
+                )
         else:
             self.input_ids[:raw_num_token].copy_(forward_batch.input_ids)
         # ==========
@@ -605,6 +614,10 @@ class CudaGraphRunner:
                 self.topk_indices[: bs].copy_(
                     forward_batch.topk_indices
                 )
+                if forward_batch.prev_hidden_states is not None:
+                    self.prev_hidden_states[: bs].copy_(
+                        forward_batch.prev_hidden_states
+                    )
             else:
                 self.input_ids[: self.raw_num_token].copy_(forward_batch.input_ids)
             self.positions[: self.raw_num_token].copy_(forward_batch.positions)

@@ -491,26 +491,74 @@ class VocabParallelEmbedding(torch.nn.Module):
     # begin of soft thinking
     # ==========
     # topk_probs is not None and topk_indices
-    def weighted_forward(self, topk_probs: torch.Tensor, topk_indices: torch.Tensor) -> torch.Tensor:
-        """Single-GPU weighted embedding forward.
+    def weighted_forward(
+        self,
+        topk_probs: torch.Tensor,
+        topk_indices: torch.Tensor,
+        prev_hidden_states: torch.Tensor = None,
+        beta: float = 2.0,
+    ) -> torch.Tensor:
+        """Spherical interpolation between static embedding and hidden state.
+
+        For weight-tied models (< 7B), e_t and h_t share the same linear space
+        through the tied embedding matrix. We interpolate on the unit sphere:
+            e_hat, h_hat = normalize(e_t), normalize(h_t)
+            α = 1 - H / (β + 1)          (entropy-adaptive)
+            z_hat = α · e_hat + √(1 - α²) · h_hat
+            z = z_hat · ‖e_t‖ / ‖z_hat‖  (rescale to embedding norm)
+
+        When prev_hidden_states is None (first step), falls back to Σ p_k e(k)
+        as the proxy for h_t.
 
         Args:
-            topk_probs: [B, K] tensor of probabilities for top-K tokens.
-            topk_indices: [B, K] tensor of token indices for top-K tokens.
+            topk_probs:  [B, K] probabilities for top-K tokens.
+            topk_indices: [B, K] token indices for top-K tokens.
+            prev_hidden_states: [B, D] real hidden state from previous step (optional).
+            beta: controls static bias (larger → more conservative).
 
         Returns:
-            hidden_states: [B, D] weighted embedding.
+            hidden_states: [B, D] interpolated embedding.
         """
+        assert topk_probs.shape == topk_indices.shape
 
-        # Validate inputs
-        assert topk_probs.shape == topk_indices.shape, "topk_probs and topk_indices must have same shape."
-
-        # Use quant_method.embedding for consistency
+        K = topk_probs.shape[-1]
         topk_embeddings = self.quant_method.embedding(self, topk_indices.long())  # [B, K, D]
-        # Normalize probs to sum to 1.0 along last dim.
-        topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True) # do norm here
-        hidden_states = torch.sum(topk_probs.unsqueeze(-1) * topk_embeddings, dim=1, dtype=topk_embeddings.dtype)  # [B, D]
-        return hidden_states
+        topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)
+
+        # e_t: static embedding of the sampled (argmax) token
+        e_t = topk_embeddings[:, 0, :]  # [B, D]
+
+        # h_t: real hidden state when available, otherwise distribution-bridge proxy
+        if prev_hidden_states is not None:
+            h_t = prev_hidden_states  # [B, D] — real h_t from model forward
+        else:
+            h_t = torch.sum(
+                topk_probs.unsqueeze(-1) * topk_embeddings, dim=1, dtype=topk_embeddings.dtype
+            )  # [B, D]
+
+        # project both onto unit sphere
+        e_t_norm = e_t.norm(dim=-1, keepdim=True).clamp(min=1e-8)   # [B, 1]
+        h_t_norm = h_t.norm(dim=-1, keepdim=True).clamp(min=1e-8)   # [B, 1]
+        e_hat = e_t / e_t_norm
+        h_hat = h_t / h_t_norm
+
+        # normalized entropy H ∈ [0, 1]
+        raw_entropy = -torch.sum(topk_probs * torch.log(topk_probs.clamp(min=1e-12)), dim=-1)
+        log_K = torch.log(torch.tensor(float(K), dtype=topk_probs.dtype, device=topk_probs.device))
+        H = (raw_entropy / log_K).clamp(0.0, 1.0)  # [B]
+
+        # α: confident (H→0) → α→1 (pure static); uncertain (H→1) → α→β/(β+1)
+        alpha = (1.0 - H / (beta + 1)).unsqueeze(-1)                # [B, 1]
+        sqrt_comp = torch.sqrt((1.0 - alpha * alpha).clamp(min=0.0))  # [B, 1]
+
+        # spherical interpolation: e_{t+1} = α·ê_t + √(1-α²)·ĥ_t
+        z_hat = alpha * e_hat + sqrt_comp * h_hat                    # [B, D]
+
+        # rescale to match original embedding magnitude
+        z_hat_norm = z_hat.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        z = z_hat * (e_t_norm / z_hat_norm)                         # [B, D]
+
+        return z.to(topk_embeddings.dtype)
 
     def weighted_forward_tp(self, topk_probs: torch.Tensor, topk_indices: torch.Tensor) -> torch.Tensor:
         """Tensor Parallel weighted embedding forward.

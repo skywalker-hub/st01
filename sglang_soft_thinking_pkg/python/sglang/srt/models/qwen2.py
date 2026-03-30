@@ -299,8 +299,10 @@ class Qwen2Model(nn.Module):
                 )
             else:
                 hidden_states = self.embed_tokens.weighted_forward(
-                    forward_batch.topk_probs, forward_batch.topk_indices
-                )  
+                    forward_batch.topk_probs,
+                    forward_batch.topk_indices,
+                    prev_hidden_states=forward_batch.prev_hidden_states,
+                )
         elif input_embeds is None:
             hidden_states = self.embed_tokens(input_ids)
         else:
