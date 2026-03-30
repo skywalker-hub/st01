@@ -517,8 +517,12 @@ class VocabParallelEmbedding(torch.nn.Module):
         # soft embedding (prior mean): Σ p[k] * e(k)
         soft_emb = torch.sum(topk_probs.unsqueeze(-1) * topk_embeddings, dim=1, dtype=topk_embeddings.dtype)  # [B, D]
 
-        # static embedding (observation): sampled token = top-1
-        static_emb = topk_embeddings[:, 0, :]  # [B, D]
+        # static embedding (observation): sample one token from the top-K distribution
+        sampled_pos = torch.multinomial(topk_probs, num_samples=1)  # [B, 1]  index within top-K
+        static_emb = torch.gather(
+            topk_embeddings, 1,
+            sampled_pos.unsqueeze(-1).expand(-1, -1, topk_embeddings.shape[-1])
+        ).squeeze(1)  # [B, D]
 
         # normalized entropy: H = (-Σ p_k log p_k) / log K  ∈ [0, 1]
         raw_entropy = -torch.sum(topk_probs * torch.log(topk_probs.clamp(min=1e-12)), dim=-1)  # [B]
