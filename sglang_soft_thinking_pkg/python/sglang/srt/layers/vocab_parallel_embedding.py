@@ -496,28 +496,26 @@ class VocabParallelEmbedding(torch.nn.Module):
         topk_probs: torch.Tensor,
         topk_indices: torch.Tensor,
         prev_hidden_states: torch.Tensor = None,
-        beta: float = 100.0,
+        lambda_max: float = 0.05,
     ) -> torch.Tensor:
-        """Spherical interpolation between static embedding and hidden state.
+        """Entropy-gated linear mix of static embedding and hidden state.
 
-        For weight-tied models (< 7B), e_t and h_t share the same linear space
-        through the tied embedding matrix. We interpolate on the unit sphere:
-            e_hat, h_hat = normalize(e_t), normalize(h_t)
-            α = 1 - H / (β + 1)          (entropy-adaptive)
-            z_hat = α · e_hat + √(1 - α²) · h_hat
-            z = z_hat · ‖e_t‖ / ‖z_hat‖  (rescale to embedding norm)
+        λ_t = lambda_max · H_t        (H_t: normalized entropy ∈ [0,1])
+        z_t = (1 - λ_t) · e_t + λ_t · h_t
+        z_t ← z_t · ‖e_t‖ / ‖z_t‖    (norm calibration)
 
-        When prev_hidden_states is None (first step), falls back to Σ p_k e(k)
-        as the proxy for h_t.
+        lambda_max directly controls the maximum h_t proportion:
+            0.1 → at most 10% h_t
+            0.3 → at most 30% h_t
 
         Args:
             topk_probs:  [B, K] probabilities for top-K tokens.
             topk_indices: [B, K] token indices for top-K tokens.
             prev_hidden_states: [B, D] real hidden state from previous step (optional).
-            beta: controls static bias (larger → more conservative).
+            lambda_max: maximum mixing ratio for h_t (default 0.1 = 10%).
 
         Returns:
-            hidden_states: [B, D] interpolated embedding.
+            hidden_states: [B, D] mixed embedding.
         """
         assert topk_probs.shape == topk_indices.shape
 
@@ -530,33 +528,27 @@ class VocabParallelEmbedding(torch.nn.Module):
 
         # h_t: real hidden state when available, otherwise distribution-bridge proxy
         if prev_hidden_states is not None:
-            h_t = prev_hidden_states  # [B, D] — real h_t from model forward
+            h_t = prev_hidden_states
         else:
             h_t = torch.sum(
                 topk_probs.unsqueeze(-1) * topk_embeddings, dim=1, dtype=topk_embeddings.dtype
-            )  # [B, D]
-
-        # project both onto unit sphere
-        e_t_norm = e_t.norm(dim=-1, keepdim=True).clamp(min=1e-8)   # [B, 1]
-        h_t_norm = h_t.norm(dim=-1, keepdim=True).clamp(min=1e-8)   # [B, 1]
-        e_hat = e_t / e_t_norm
-        h_hat = h_t / h_t_norm
+            )
 
         # normalized entropy H ∈ [0, 1]
         raw_entropy = -torch.sum(topk_probs * torch.log(topk_probs.clamp(min=1e-12)), dim=-1)
         log_K = torch.log(torch.tensor(float(K), dtype=topk_probs.dtype, device=topk_probs.device))
         H = (raw_entropy / log_K).clamp(0.0, 1.0)  # [B]
 
-        # α: confident (H→0) → α→1 (pure static); uncertain (H→1) → α→β/(β+1)
-        alpha = (1.0 - H / (beta + 1)).unsqueeze(-1)                # [B, 1]
-        sqrt_comp = torch.sqrt((1.0 - alpha * alpha).clamp(min=0.0))  # [B, 1]
+        # λ_t = lambda_max · H, range [0, lambda_max]
+        lam = (lambda_max * H).unsqueeze(-1)  # [B, 1]
 
-        # spherical interpolation: e_{t+1} = α·ê_t + √(1-α²)·ĥ_t
-        z_hat = alpha * e_hat + sqrt_comp * h_hat                    # [B, D]
+        # linear mix
+        z = (1.0 - lam) * e_t + lam * h_t  # [B, D]
 
-        # rescale to match original embedding magnitude
-        z_hat_norm = z_hat.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-        z = z_hat * (e_t_norm / z_hat_norm)                         # [B, D]
+        # norm calibration: keep ‖z‖ ≈ ‖e_t‖
+        e_t_norm = e_t.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        z_norm = z.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        z = z * (e_t_norm / z_norm)
 
         return z.to(topk_embeddings.dtype)
 
