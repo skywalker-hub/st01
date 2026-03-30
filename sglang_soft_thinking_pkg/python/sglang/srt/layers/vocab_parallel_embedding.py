@@ -496,7 +496,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         topk_probs: torch.Tensor,
         topk_indices: torch.Tensor,
         prev_hidden_states: torch.Tensor = None,
-        beta: float = 0.25,
+        beta: float = 2,
     ) -> torch.Tensor:
         """Spherical interpolation between static embedding and hidden state.
 
