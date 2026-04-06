@@ -491,48 +491,56 @@ class VocabParallelEmbedding(torch.nn.Module):
     # begin of soft thinking
     # ==========
     # topk_probs is not None and topk_indices
-    def weighted_forward(self, topk_probs: torch.Tensor, topk_indices: torch.Tensor, beta: float = 0.1) -> torch.Tensor:
-        """Single-GPU Mixture-of-Inputs embedding forward.
+    def weighted_forward(self, topk_probs: torch.Tensor, topk_indices: torch.Tensor,
+                         gamma: float = 2.0, tau: float = 1.0) -> torch.Tensor:
+        """Single-GPU HERI (Heuristic Residual Injection) embedding forward.
 
-        h_t = (H / (β+1)) * soft_emb + ((β+1-H) / (β+1)) * static_emb
-
-        where H is the *normalized* entropy (H ∈ [0, 1]) of topk_probs,
-        soft_emb is the probability-weighted mixture embedding,
-        and static_emb is the sampled (argmax) token embedding.
+        1. Sample y_sampled from top-K distribution → e_sampled
+        2. Uncertainty proxy: u_t = 1 - max(p)
+        3. Exponential decay gating: α_t = exp(-γ · u_t)
+        4. Exclusive exploratory vector: remove y_sampled, re-normalize with τ → e_alt
+        5. Linear mix: E_input = α_t · e_sampled + (1 - α_t) · e_alt
 
         Args:
-            topk_probs: [B, K] tensor of probabilities for top-K tokens.
-            topk_indices: [B, K] tensor of token indices for top-K tokens.
-            beta: mixing hyperparameter controlling the soft/static trade-off.
+            topk_probs:  [B, K] probabilities for top-K tokens.
+            topk_indices: [B, K] token indices for top-K tokens.
+            gamma: decay steepness for the gating function (recommended 1.5~3.0).
+            tau: temperature for re-normalizing the alternative distribution.
 
         Returns:
             hidden_states: [B, D] mixed embedding.
         """
         assert topk_probs.shape == topk_indices.shape, "topk_probs and topk_indices must have same shape."
 
-        K = topk_probs.shape[-1]
         topk_embeddings = self.quant_method.embedding(self, topk_indices.long())  # [B, K, D]
         topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)
 
-        # soft embedding (prior mean): Σ p[k] * e(k)
-        soft_emb = torch.sum(topk_probs.unsqueeze(-1) * topk_embeddings, dim=1, dtype=topk_embeddings.dtype)  # [B, D]
-
-        # static embedding (observation): sample one token from the top-K distribution
-        sampled_pos = torch.multinomial(topk_probs, num_samples=1)  # [B, 1]  index within top-K
-        static_emb = torch.gather(
+        # --- Step 1: Sample discrete token ---
+        sampled_pos = torch.multinomial(topk_probs, num_samples=1)  # [B, 1]
+        e_sampled = torch.gather(
             topk_embeddings, 1,
             sampled_pos.unsqueeze(-1).expand(-1, -1, topk_embeddings.shape[-1])
         ).squeeze(1)  # [B, D]
 
-        # normalized entropy: H = (-Σ p_k log p_k) / log K  ∈ [0, 1]
-        raw_entropy = -torch.sum(topk_probs * torch.log(topk_probs.clamp(min=1e-12)), dim=-1)  # [B]
-        log_K = torch.log(torch.tensor(K, dtype=topk_probs.dtype, device=topk_probs.device))
-        H = (raw_entropy / log_K).clamp(0.0, 1.0)  # [B]
+        # --- Step 2: Uncertainty proxy ---
+        u_t = 1.0 - topk_probs.max(dim=-1).values  # [B]
 
-        alpha_soft = (H / (beta + 1)).unsqueeze(-1)       # [B, 1]
-        alpha_static = 1.0 - alpha_soft                    # [B, 1]
+        # --- Step 3: Exponential decay gating ---
+        alpha_t = torch.exp(-gamma * u_t)  # [B]
 
-        hidden_states = (alpha_soft * soft_emb + alpha_static * static_emb).to(soft_emb.dtype)  # [B, D]
+        # --- Step 4: Exclusive exploratory soft vector ---
+        mask = torch.ones_like(topk_probs, dtype=torch.bool)
+        mask.scatter_(1, sampled_pos, False)  # mask out sampled token
+
+        alt_logits = torch.log(topk_probs.clamp(min=1e-12)) / tau
+        alt_logits.masked_fill_(~mask, float('-inf'))
+        alt_probs = torch.softmax(alt_logits, dim=-1)  # [B, K], sampled pos = 0
+
+        e_alt = torch.sum(alt_probs.unsqueeze(-1) * topk_embeddings, dim=1, dtype=topk_embeddings.dtype)  # [B, D]
+
+        # --- Step 5: Linear interpolation ---
+        alpha = alpha_t.unsqueeze(-1)  # [B, 1]
+        hidden_states = (alpha * e_sampled + (1.0 - alpha) * e_alt).to(e_sampled.dtype)  # [B, D]
         return hidden_states
 
     def weighted_forward_tp(self, topk_probs: torch.Tensor, topk_indices: torch.Tensor) -> torch.Tensor:
