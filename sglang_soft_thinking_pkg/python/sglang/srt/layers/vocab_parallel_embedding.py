@@ -492,7 +492,7 @@ class VocabParallelEmbedding(torch.nn.Module):
     # ==========
     # topk_probs is not None and topk_indices
     def weighted_forward(self, topk_probs: torch.Tensor, topk_indices: torch.Tensor,
-                         gamma: float = 0.5, tau: float = 1.0) -> torch.Tensor:
+                         gamma: float = 0.1, tau: float = 1.0) -> torch.Tensor:
         """Single-GPU HERI (Heuristic Residual Injection) embedding forward.
 
         1. Sample y_sampled from top-K distribution → e_sampled
