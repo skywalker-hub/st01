@@ -76,7 +76,6 @@ class AIMEEvaluator(MathEvaluator):
                     boxed_match_priority=0,
                     try_extract_without_anchor=False,
                 ),
-                ExprExtractionConfig(),
             ],
             extraction_mode="first_match",
         )
@@ -114,7 +113,6 @@ class GSM8KEvaluator(MathEvaluator):
                     boxed_match_priority=0,
                     try_extract_without_anchor=False,
                 ),
-                ExprExtractionConfig(),
             ],
             extraction_mode="first_match",
         )
@@ -183,7 +181,6 @@ class MATH500Evaluator(MathEvaluator):
                     boxed_match_priority=0,
                     try_extract_without_anchor=False,
                 ),
-                ExprExtractionConfig(),
             ],
             extraction_mode="first_match",
         )
@@ -219,7 +216,6 @@ class AMCEvaluator(MathEvaluator):
                     boxed_match_priority=0,
                     try_extract_without_anchor=False,
                 ),
-                ExprExtractionConfig(),
             ],
             extraction_mode="first_match",
         )
