@@ -280,20 +280,18 @@ Reference answer: {ground_truth}""".strip()
 
 class ARCChallengeEvaluator(MathEvaluator):
     def rule_judge(self, solution_str: str, ground_truth: str, finish_generation: bool = True) -> bool:
-        gold = parse(
-            ground_truth,
-            extraction_config=[StringExtractionConfig()],
-        )
-        answer = parse(
-            solution_str,
-            extraction_config=[
-                StringExtractionConfig(),
-            ]
-        )
-        if len(answer) == 0:
-            return False, "No extracted answer"
-        else:
-            return verify(gold, answer), str(answer)
+        ground_truth_upper = ground_truth.strip().upper()
+        answer_str = self.extract_after_think(solution_str, finish_generation=finish_generation)
+        import re
+        boxed = re.findall(r'\\boxed\{([^}]*)\}', answer_str)
+        if boxed:
+            extracted = boxed[-1].strip().upper()
+            return extracted == ground_truth_upper, extracted
+        match = re.search(r'\b([A-D])\b\s*$', answer_str.strip())
+        if match:
+            extracted = match.group(1).upper()
+            return extracted == ground_truth_upper, extracted
+        return False, "No extracted answer"
 
     def get_llm_judge_prompt(self, solution_str: str, ground_truth: str, extract_answer: str = "", finish_generation: bool = True) -> str:
         solution_str = self.extract_after_think(solution_str, finish_generation=finish_generation)
