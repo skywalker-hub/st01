@@ -1,5 +1,6 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/v0.6.3.post1/vllm/model_executor/layers/vocab_parallel_embedding.py
 
+import os
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -492,19 +493,20 @@ class VocabParallelEmbedding(torch.nn.Module):
     # ==========
     # topk_probs is not None and topk_indices
     def weighted_forward(self, topk_probs: torch.Tensor, topk_indices: torch.Tensor,
-                         gamma: float = 0.05, tau: float = 1.0) -> torch.Tensor:
+                         gamma: float = 3.0, theta: float = 0.2, tau: float = 1.0) -> torch.Tensor:
         """Single-GPU HERI (Heuristic Residual Injection) embedding forward.
 
         1. Sample y_sampled from top-K distribution → e_sampled
-        2. Uncertainty proxy: u_t = 1 - max(p)
-        3. Exponential decay gating: α_t = exp(-γ · u_t)
+        2. Normalized entropy: H_t = (-Σ p_k log p_k) / log K  ∈ [0, 1]
+        3. Thresholded exponential decay gating: α_t = exp(-γ · max(0, H_t - θ))
         4. Exclusive exploratory vector: remove y_sampled, re-normalize with τ → e_alt
         5. Linear mix: E_input = α_t · e_sampled + (1 - α_t) · e_alt
 
         Args:
             topk_probs:  [B, K] probabilities for top-K tokens.
             topk_indices: [B, K] token indices for top-K tokens.
-            gamma: decay steepness for the gating function (recommended 1.5~3.0).
+            gamma: decay steepness — controls exploration intensity (ablation axis 1).
+            theta: entropy threshold — exploration only activates when H_t > θ (ablation axis 2).
             tau: temperature for re-normalizing the alternative distribution.
 
         Returns:
@@ -512,6 +514,11 @@ class VocabParallelEmbedding(torch.nn.Module):
         """
         assert topk_probs.shape == topk_indices.shape, "topk_probs and topk_indices must have same shape."
 
+        gamma = float(os.environ.get('HERI_GAMMA', gamma))
+        theta = float(os.environ.get('HERI_THETA', theta))
+        tau   = float(os.environ.get('HERI_TAU', tau))
+
+        K = topk_probs.shape[-1]
         topk_embeddings = self.quant_method.embedding(self, topk_indices.long())  # [B, K, D]
         topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)
 
@@ -522,15 +529,17 @@ class VocabParallelEmbedding(torch.nn.Module):
             sampled_pos.unsqueeze(-1).expand(-1, -1, topk_embeddings.shape[-1])
         ).squeeze(1)  # [B, D]
 
-        # --- Step 2: Uncertainty proxy ---
-        u_t = 1.0 - topk_probs.max(dim=-1).values  # [B]
+        # --- Step 2: Normalized entropy ---
+        raw_entropy = -torch.sum(topk_probs * torch.log(topk_probs.clamp(min=1e-12)), dim=-1)  # [B]
+        log_K = torch.log(torch.tensor(K, dtype=topk_probs.dtype, device=topk_probs.device))
+        H_t = (raw_entropy / log_K).clamp(0.0, 1.0)  # [B]
 
-        # --- Step 3: Exponential decay gating ---
-        alpha_t = torch.exp(-gamma * u_t)  # [B]
+        # --- Step 3: Thresholded exponential decay gating ---
+        alpha_t = torch.exp(-gamma * (H_t - theta).clamp(min=0.0))  # [B]
 
         # --- Step 4: Exclusive exploratory soft vector ---
         mask = torch.ones_like(topk_probs, dtype=torch.bool)
-        mask.scatter_(1, sampled_pos, False)  # mask out sampled token
+        mask.scatter_(1, sampled_pos, False)
 
         alt_logits = torch.log(topk_probs.clamp(min=1e-12)) / tau
         alt_logits.masked_fill_(~mask, float('-inf'))
