@@ -278,6 +278,30 @@ Reference answer: {ground_truth}""".strip()
 # Reference answer: {ground_truth}""".strip()
 
 
+class ARCChallengeEvaluator(MathEvaluator):
+    def rule_judge(self, solution_str: str, ground_truth: str, finish_generation: bool = True) -> bool:
+        gold = parse(
+            ground_truth,
+            extraction_config=[StringExtractionConfig()],
+        )
+        answer = parse(
+            solution_str,
+            extraction_config=[
+                StringExtractionConfig(),
+            ]
+        )
+        if len(answer) == 0:
+            return False, "No extracted answer"
+        else:
+            return verify(gold, answer), str(answer)
+
+    def get_llm_judge_prompt(self, solution_str: str, ground_truth: str, extract_answer: str = "", finish_generation: bool = True) -> str:
+        solution_str = self.extract_after_think(solution_str, finish_generation=finish_generation)
+        return f"""Please determine whether the final answer provided in the model-generated response is equivalent to the reference answer from a multiple choice question. The final answer may either be enclosed in \\boxed{{}} or appear after "Answer:". If they are equivalent, return "YES"; if they are not, return "NO". Only return "YES" or "NO", and do not generate any other content.
+Model-generated answer: {solution_str}
+Reference answer: {ground_truth}""".strip()
+
+
 evaluator_map = {
     "aime2024": AIMEEvaluator(),
     "aime2025": AIMEEvaluator(),
@@ -285,6 +309,7 @@ evaluator_map = {
     "math500": MATH500Evaluator(),
     "gpqa_diamond": GPQAEvaluator(),
     "amc23": AMCEvaluator(),
+    "arc_challenge": ARCChallengeEvaluator(),
 }
 
 API_BASE = None

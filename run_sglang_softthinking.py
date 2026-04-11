@@ -16,13 +16,13 @@ import torch
 import time
 import convert_livecodebench
 
-MATH_DATASETS = ["math500","aime2024","aime2025","gpqa_diamond","gsm8k","amc23"]
+MATH_DATASETS = ["math500","aime2024","aime2025","gpqa_diamond","gsm8k","amc23","arc_challenge"]
 CODE_DATASETS = ["humaneval","mbpp","livecodebench"]
 
 def main():
     # parse arguments
     parser = argparse.ArgumentParser(description='Process some parameters for text generation.')
-    parser.add_argument('--dataset', type=str, choices=["math500", "aime2024", "aime2025", "gpqa_diamond", "gsm8k", "amc23", "humaneval", "mbpp", "livecodebench"], help='Name of dataset')
+    parser.add_argument('--dataset', type=str, choices=["math500", "aime2024", "aime2025", "gpqa_diamond", "gsm8k", "amc23", "arc_challenge", "humaneval", "mbpp", "livecodebench"], help='Name of dataset')
     parser.add_argument('--sampling_backend', type=str, choices=["pytorch", "flashinfer"], default="flashinfer", help='Sampling backend')
     parser.add_argument('--model_name', type=str, required=True, default="Qwen/QwQ-32B", help='Model name or path')
     parser.add_argument('--num_gpus', type=int, default=8, help='GPU number (tensor parallel size, tp_size)')
@@ -122,6 +122,9 @@ def main():
     elif dataset == "mbpp":
         with open("./datasets/mbpp.json") as f:
             samples = json.load(f)
+    elif dataset == "arc_challenge":
+        with open("./datasets/arc_challenge.json") as f:
+            samples = json.load(f)
     elif dataset == "livecodebench":
         with open("./datasets/livecodebench.json") as f:
             samples = json.load(f)
@@ -137,6 +140,12 @@ Please reason step by step, and put your final answer within \\boxed{{}}.
 
     GPQA_QUERY_TEMPLATE = """
 Please solve the following multiple-choice question. Please show your choice in the answer field with only the choice letter, e.g.,"answer": "C".
+
+{Question}
+""".strip()
+
+    ARC_CHALLENGE_QUERY_TEMPLATE = """
+Please solve the following multiple-choice question. Put your final answer (only the choice letter, e.g., A, B, C, or D) within \\boxed{{}}.
 
 {Question}
 """.strip()
@@ -230,6 +239,8 @@ Test Cases:
                 chat = [{"role": "user", "content": MATH_QUERY_TEMPLATE.format(Question=sample["prompt"][0]["value"])}]
             elif dataset == "gpqa_diamond":
                 chat = [{"role": "user", "content": GPQA_QUERY_TEMPLATE.format(Question=sample["prompt"][0]["value"])}]
+            elif dataset == "arc_challenge":
+                chat = [{"role": "user", "content": ARC_CHALLENGE_QUERY_TEMPLATE.format(Question=sample["prompt"][0]["value"])}]
             elif dataset == "humaneval":
                 chat = [{"role": "user", "content": CODE_QUERY_TEMPLATE.format(Question=sample["prompt"][0]["value"])}]
             elif dataset == "mbpp":
